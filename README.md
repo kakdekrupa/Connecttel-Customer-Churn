@@ -107,8 +107,8 @@ Run all cells top to bottom. The notebook is structured as a single continuous r
 streamlit run app/streamlit_app.py
 ```
 
-Opens at https://connecttel-customer-churn-l2ebpyugosa9fm6sauoe46.streamlit.app/ The app:
-
+Opens at https://connecttel-customer-churn-l2ebpyugosa9fm6sauoe46.streamlit.app/ 
+The app:
 - Takes a customer's profile as input (tenure, charges, contract, internet service, tech support)
 - Runs an animated pipeline (**Input Received → Preprocessing → Model Scoring → Result Ready**) that clears itself once the result is ready
 - Displays a color-coded **risk gauge** (green/amber/red) with the churn probability
