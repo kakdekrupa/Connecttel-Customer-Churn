@@ -1,162 +1,186 @@
 """
 ConnectTel Customer Churn Predictor — Streamlit App
-Dark corporate theme with an animated prediction pipeline, live risk gauge,
-and per-customer SHAP factor breakdown.
+Editorial "ink & paper" data-terminal theme: monospace terminal-style pipeline
+status, a hand-built radial tick-ring gauge, and rung-tick SHAP factor bars.
+Visual language adapted from an editorial print-data aesthetic (hairline
+rules, an ink/paper palette, ladder-based grayscale hierarchy) combined with
+a terminal boot-log status pattern for the live scoring pipeline.
 
 Run with:  streamlit run app/streamlit_app.py
 """
 
+import math
 import time
 
 import joblib
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import shap
 import streamlit as st
 
 # ─────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG + THEME
+# PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ConnectTel Churn Predictor",
-    page_icon="📡",
+    page_icon="◆",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
 
-DARK_CSS = """
+# ─────────────────────────────────────────────────────────────────────────
+# DESIGN TOKENS — ink/paper editorial palette, dark ground
+# ─────────────────────────────────────────────────────────────────────────
+INK = "#1b1b19"     # background
+PAPER = "#f1f0ec"   # primary text
+MUTED = "#8b8a84"   # secondary text
+HAIR = "#3a3934"    # hairline rule
+FAINT = "#4c4b45"   # unfilled tick color
+RISK = "#d9695f"    # muted editorial red  — increases risk
+INFO = "#6fa8c9"    # muted editorial blue — decreases risk
+SAFE = "#5fa87c"    # muted editorial green
+WARN = "#c9a227"    # muted editorial amber
+
+EDITORIAL_CSS = f"""
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Serif:wght@500;600&display=swap" rel="stylesheet">
 <style>
-    :root {
-        --bg: #0b1220;
-        --panel: #131c2e;
-        --panel-border: #223049;
-        --text: #e6ebf5;
-        --muted: #8a97ab;
-        --accent: #38bdf8;
-        --danger: #f87171;
-        --safe: #34d399;
-        --warn: #fbbf24;
-    }
+    :root {{
+        --ink: {INK}; --paper: {PAPER}; --muted: {MUTED};
+        --hair: {HAIR}; --faint: {FAINT};
+        --risk: {RISK}; --info: {INFO}; --safe: {SAFE}; --warn: {WARN};
+    }}
 
-    .stApp {
-        background: radial-gradient(circle at 20% 0%, #101a2d 0%, #0b1220 55%);
-        color: var(--text);
-    }
+    .stApp {{ background: var(--ink); color: var(--paper); }}
+    #MainMenu, footer, header {{ visibility: hidden; }}
 
-    /* Hide default streamlit chrome for a cleaner "product" feel */
-    #MainMenu, footer, header {visibility: hidden;}
+    html, body, [class*="css"] {{ font-family: 'IBM Plex Mono', monospace; }}
 
-    .ct-header {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        margin-bottom: 4px;
-    }
-    .ct-logo {
-        width: 42px; height: 42px;
-        border-radius: 10px;
-        background: linear-gradient(135deg, #38bdf8, #0ea5e9);
-        display: flex; align-items: center; justify-content: center;
-        font-size: 22px;
-        box-shadow: 0 0 24px rgba(56,189,248,0.35);
-    }
-    .ct-title { font-size: 26px; font-weight: 700; margin: 0; color: var(--text); }
-    .ct-subtitle { color: var(--muted); font-size: 14px; margin-top: -2px; }
+    .eyebrow {{
+        font-size: 11px; letter-spacing: 3px; color: var(--muted);
+        font-weight: 600; text-transform: uppercase; margin-bottom: 2px;
+    }}
+    .headline {{
+        font-family: 'IBM Plex Serif', serif; font-weight: 600;
+        font-size: 30px; color: var(--paper); margin: 4px 0 2px 0;
+    }}
+    .subtitle {{ color: var(--muted); font-size: 13.5px; margin-bottom: 6px; }}
 
-    .ct-card {
-        background: var(--panel);
-        border: 1px solid var(--panel-border);
-        border-radius: 14px;
-        padding: 20px 22px;
-        margin-bottom: 18px;
-    }
-    .ct-section-label {
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-size: 12px;
-        color: var(--accent);
-        font-weight: 600;
-        margin-bottom: 10px;
-    }
+    .section {{
+        border-top: 1px solid var(--hair);
+        padding-top: 18px; margin-top: 28px;
+    }}
+    .section-label {{
+        font-size: 10.5px; letter-spacing: 2.5px; color: var(--muted);
+        font-weight: 600; text-transform: uppercase; margin-bottom: 16px;
+    }}
 
-    /* Pipeline stepper */
-    .pipeline {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        margin: 6px 0 4px 0;
-    }
-    .step {
-        flex: 1;
-        text-align: center;
-        position: relative;
-        color: var(--muted);
-        font-size: 12.5px;
-    }
-    .step-circle {
-        width: 34px; height: 34px;
-        border-radius: 50%;
-        margin: 0 auto 8px auto;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 16px;
-        border: 2px solid var(--panel-border);
-        background: #0e1626;
-        transition: all 0.25s ease;
-    }
-    .step-pending .step-circle { color: var(--muted); }
-    .step-active .step-circle {
-        border-color: var(--accent);
-        color: var(--accent);
-        box-shadow: 0 0 14px rgba(56,189,248,0.45);
-    }
-    .step-done .step-circle {
-        border-color: var(--safe);
-        background: rgba(52,211,153,0.12);
-        color: var(--safe);
-    }
-    .step-active .step-label { color: var(--accent); font-weight: 600; }
-    .step-done .step-label { color: var(--safe); }
-    .step-line {
-        position: absolute;
-        top: 17px; left: -50%;
-        width: 100%; height: 2px;
-        background: var(--panel-border);
-        z-index: -1;
-    }
-    .step:first-child .step-line { display: none; }
+    /* Terminal-style pipeline status */
+    .terminal-steps {{ font-size: 12px; letter-spacing: 0.5px; }}
+    .term-step {{ margin-right: 22px; color: var(--faint); }}
+    .term-done {{ color: var(--safe); }}
+    .term-active {{ color: var(--paper); font-weight: 600; }}
+    .term-pending {{ color: var(--faint); }}
+    .hairline-track {{ height: 1px; background: var(--hair); margin-top: 12px; }}
+    .hairline-fill {{ height: 1px; background: var(--paper); }}
 
-    .result-high {
-        border-left: 4px solid var(--danger);
-        background: rgba(248,113,113,0.08);
-    }
-    .result-low {
-        border-left: 4px solid var(--safe);
-        background: rgba(52,211,153,0.08);
-    }
-    .result-badge {
+    /* Result */
+    .badge {{
+        font-size: 13px; letter-spacing: 2px; font-weight: 700;
+        text-transform: uppercase; padding-left: 12px; margin-bottom: 4px;
         display: inline-block;
-        padding: 4px 12px;
-        border-radius: 999px;
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 0.03em;
-    }
-    .badge-high { background: rgba(248,113,113,0.15); color: var(--danger); }
-    .badge-low { background: rgba(52,211,153,0.15); color: var(--safe); }
+    }}
+    .gauge-wrap {{ display: flex; justify-content: center; margin: 8px 0 22px 0; }}
+    .verdict-note {{
+        text-align: center; color: var(--muted); font-size: 12px;
+        margin-top: -8px; margin-bottom: 4px;
+    }}
 
-    .factor-row { font-size: 13.5px; margin-bottom: 6px; color: var(--text); }
-    .factor-bar-bg {
-        background: #0e1626;
-        border-radius: 6px;
-        height: 8px;
-        width: 100%;
-        overflow: hidden;
-        margin-top: 3px;
-    }
+    /* Factor rows */
+    .factor-row {{
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 10px 0; border-bottom: 1px solid var(--hair);
+        font-size: 12px; flex-wrap: wrap; gap: 6px;
+    }}
+    .factor-row:last-child {{ border-bottom: none; }}
+    .factor-label {{ color: var(--paper); letter-spacing: 0.2px; flex: 1 1 200px; }}
+    .factor-viz {{ display: flex; align-items: center; gap: 12px; }}
+    .factor-dir {{
+        font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase;
+        width: 100px;
+    }}
+    .footnote {{ color: var(--muted); font-size: 11px; margin-top: 18px; line-height: 1.6; }}
+
+    /* Native widget reskin — flat, hairline-bordered, no rounded gradients */
+    div[data-testid="stSlider"] label, div[data-testid="stSelectbox"] label,
+    div[data-testid="stNumberInput"] label {{
+        color: var(--muted) !important; font-size: 11.5px !important;
+        letter-spacing: 1px; text-transform: uppercase;
+    }}
+    .stButton > button {{
+        background: transparent; color: var(--paper);
+        border: 1px solid var(--paper); border-radius: 0;
+        font-family: 'IBM Plex Mono', monospace; letter-spacing: 2px;
+        text-transform: uppercase; font-size: 12.5px; font-weight: 600;
+        padding: 10px 0; width: 100%;
+    }}
+    .stButton > button:hover {{ background: var(--paper); color: var(--ink); }}
 </style>
 """
-st.markdown(DARK_CSS, unsafe_allow_html=True)
+st.markdown(EDITORIAL_CSS, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CUSTOM SVG COMPONENTS — radial tick-ring gauge & rung-tick factor bars
+# ─────────────────────────────────────────────────────────────────────────
+def tick_ring_svg(value: float, size: int = 220, n_ticks: int = 72) -> str:
+    """A dial made of radial dashes, one per ~1.4 percentage points, filled
+    clockwise from the top. Color reflects the risk band the value falls in."""
+    color = RISK if value >= 70 else WARN if value >= 40 else SAFE
+    cx = cy = size / 2
+    outer_r = size / 2 - 12
+    inner_r = outer_r - 16
+    filled = round(value / 100 * n_ticks)
+    lines = []
+    for i in range(n_ticks):
+        angle = math.radians(i * (360 / n_ticks) - 90)
+        x1, y1 = cx + inner_r * math.cos(angle), cy + inner_r * math.sin(angle)
+        x2, y2 = cx + outer_r * math.cos(angle), cy + outer_r * math.sin(angle)
+        major = i % (n_ticks // 4) == 0
+        sw = 2.6 if major else 1.4
+        c = color if i < filled else FAINT
+        lines.append(
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="{c}" stroke-width="{sw}" stroke-linecap="round"/>'
+        )
+    return f'''<svg viewBox="0 0 {size} {size}" width="{size}" height="{size}">
+        {"".join(lines)}
+        <text x="{cx}" y="{cy - 2}" text-anchor="middle" font-family="IBM Plex Mono, monospace"
+              font-size="36" font-weight="700" fill="{PAPER}">{value:.0f}%</text>
+        <text x="{cx}" y="{cy + 24}" text-anchor="middle" font-family="IBM Plex Mono, monospace"
+              font-size="10.5" letter-spacing="2.5" fill="{MUTED}">CHURN RISK</text>
+    </svg>'''
+
+
+def rung_bar_svg(pct_width: float, color: str, width: int = 200, height: int = 22, n: int = 22) -> str:
+    """A magnitude bar built from countable ticks rather than a solid fill —
+    every 5th tick drawn taller, echoing a ruled scale."""
+    filled = round(pct_width / 100 * n)
+    tick_w = width / n
+    lines = []
+    for i in range(n):
+        x = i * tick_w + tick_w / 2
+        tall = (i + 1) % 5 == 0
+        h = height * (0.95 if tall else 0.55)
+        y2 = height
+        y1 = y2 - h
+        c = color if i < filled else FAINT
+        sw = 2.4 if tall else 1.5
+        lines.append(
+            f'<line x1="{x:.1f}" y1="{y1:.1f}" x2="{x:.1f}" y2="{y2:.1f}" '
+            f'stroke="{c}" stroke-width="{sw}" stroke-linecap="round"/>'
+        )
+    return f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}">{"".join(lines)}</svg>'
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # LOAD MODEL + EXPLAINER (cached so this only runs once per session)
@@ -175,24 +199,16 @@ model, model_columns, explainer = load_artifacts()
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────
 st.markdown(
-    """
-    <div class="ct-header">
-        <div class="ct-logo">📡</div>
-        <div>
-            <p class="ct-title">ConnectTel Churn Predictor</p>
-            <p class="ct-subtitle">Live risk scoring for the retention team</p>
-        </div>
-    </div>
-    """,
+    '<div class="eyebrow">CONNECTTEL ANALYTICS</div>'
+    '<div class="headline">Churn Risk Terminal</div>'
+    '<div class="subtitle">Live risk scoring for the retention team</div>',
     unsafe_allow_html=True,
 )
-st.write("")
 
 # ─────────────────────────────────────────────────────────────────────────
-# INPUT CARD
+# INPUT SECTION
 # ─────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="ct-card">', unsafe_allow_html=True)
-st.markdown('<div class="ct-section-label">Customer Profile</div>', unsafe_allow_html=True)
+st.markdown('<div class="section"><div class="section-label">Customer Profile</div></div>', unsafe_allow_html=True)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -204,33 +220,38 @@ with col2:
     internet_service = st.selectbox("Internet Service", ["DSL", "Fiber optic", "No"])
     tech_support = st.selectbox("Tech Support", ["Yes", "No"])
 
-predict_clicked = st.button("▶  Run Prediction", use_container_width=True)
-st.markdown("</div>", unsafe_allow_html=True)
+predict_clicked = st.button("Run Prediction \u2192")
 
 # ─────────────────────────────────────────────────────────────────────────
-# PIPELINE RENDERER
+# TERMINAL-STYLE PIPELINE RENDERER
 # ─────────────────────────────────────────────────────────────────────────
-STEPS = ["Input Received", "Preprocessing", "Model Scoring", "Result Ready"]
+STEPS = ["INPUT", "PREPROCESS", "SCORE", "RESULT"]
 
 
 def render_pipeline(active_index, placeholder):
-    """active_index: steps before this are 'done', this one is 'active', rest 'pending'."""
-    html = '<div class="ct-card"><div class="pipeline">'
+    """active_index: steps before this are 'done' [\u2713], this one is 'active'
+    [\u25cf], the rest are 'pending' [\u00b7]. A hairline rule fills underneath
+    proportionally, echoing a terminal boot-log progress bar."""
+    parts = []
     for i, label in enumerate(STEPS):
         if i < active_index:
-            state, icon = "step-done", "✓"
+            mark, cls = "\u2713", "term-done"
         elif i == active_index:
-            state, icon = "step-active", "●"
+            mark, cls = "\u25cf", "term-active"
         else:
-            state, icon = "step-pending", "○"
-        html += f'''
-            <div class="step {state}">
-                <div class="step-line"></div>
-                <div class="step-circle">{icon}</div>
-                <div class="step-label">{label}</div>
-            </div>
-        '''
-    html += "</div></div>"
+            mark, cls = "\u00b7", "term-pending"
+        parts.append(f'<span class="term-step {cls}">[{mark}] {label}</span>')
+    progress = min(100, active_index / len(STEPS) * 100)
+    # NOTE: built as a single line on purpose — a multi-line indented HTML
+    # string passed to st.markdown can get misread as an indented code block
+    # by the Markdown parser (see the note above render_pipeline's caller).
+    html = (
+        '<div class="section">'
+        '<div class="section-label">Prediction Pipeline</div>'
+        f'<div class="terminal-steps">{"".join(parts)}</div>'
+        f'<div class="hairline-track"><div class="hairline-fill" style="width:{progress:.0f}%"></div></div>'
+        '</div>'
+    )
     placeholder.markdown(html, unsafe_allow_html=True)
 
 
@@ -247,13 +268,13 @@ if predict_clicked:
     # Step 1: Preprocessing — build the aligned feature row
     render_pipeline(1, pipeline_slot)
     input_dict = {
-            "tenure": tenure,
-            "MonthlyCharges": monthly_charges,
-            "TotalCharges": total_charges,
-            f"Contract_{contract}": 1,
-            f"InternetService_{internet_service}": 1,
-            "TechSupport_Yes": 1 if tech_support == "Yes" else 0,
-        }
+        "tenure": tenure,
+        "MonthlyCharges": monthly_charges,
+        "TotalCharges": total_charges,
+        f"Contract_{contract}": 1,
+        f"InternetService_{internet_service}": 1,
+        "TechSupport_Yes": 1 if tech_support == "Yes" else 0,
+    }
     input_df = pd.DataFrame([input_dict]).reindex(columns=model_columns, fill_value=0)
     time.sleep(0.45)
 
@@ -270,63 +291,26 @@ if predict_clicked:
     pipeline_slot.empty()  # remove the pipeline entirely — result takes its place, no leftover gap
 
     is_high_risk = proba > 0.5
+    churn_pct = proba * 100
+    badge_color = RISK if is_high_risk else SAFE
+    badge_text = "\u25b2 High Risk" if is_high_risk else "\u25bc Low Risk"
 
-    is_high_risk = proba > 0.5
-    result_class = "result-high" if is_high_risk else "result-low"
-    badge_class = "badge-high" if is_high_risk else "badge-low"
-    badge_text = "HIGH RISK" if is_high_risk else "LOW RISK"
-
-    # ── Result card with gauge ──────────────────────────────────────────
-    st.markdown(f'<div class="ct-card {result_class}">', unsafe_allow_html=True)
-    st.markdown('<div class="ct-section-label">Prediction Result</div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<span class="result-badge {badge_class}">{badge_text}</span>',
-        unsafe_allow_html=True,
+    # ── Result: badge + tick-ring gauge ─────────────────────────────────
+    # Built as a single-line string — see the note in render_pipeline() on
+    # why multi-line indented HTML passed to st.markdown is risky here.
+    verdict_text = ("Recommend routing this customer to the retention team." if is_high_risk
+                     else "Customer appears stable \u2014 no action needed.")
+    result_html = (
+        '<div class="section">'
+        '<div class="section-label">Prediction Result</div>'
+        f'<div class="badge" style="border-left:2px solid {badge_color}; color:{badge_color};">{badge_text}</div>'
+        f'<div class="gauge-wrap">{tick_ring_svg(churn_pct)}</div>'
+        f'<div class="verdict-note">{verdict_text}</div>'
+        '</div>'
     )
+    st.markdown(result_html, unsafe_allow_html=True)
 
-    gauge_color = "#f87171" if is_high_risk else "#34d399"
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=proba * 100,
-            number={"suffix": "%", "font": {"color": "#e6ebf5", "size": 40}},
-            gauge={
-                "axis": {"range": [0, 100], "tickcolor": "#8a97ab"},
-                "bar": {"color": gauge_color, "thickness": 0.3},
-                "bgcolor": "#0e1626",
-                "borderwidth": 0,
-                "steps": [
-                    {"range": [0, 40], "color": "rgba(52,211,153,0.18)"},
-                    {"range": [40, 70], "color": "rgba(251,191,36,0.18)"},
-                    {"range": [70, 100], "color": "rgba(248,113,113,0.18)"},
-                ],
-                "threshold": {
-                    "line": {"color": "#e6ebf5", "width": 3},
-                    "thickness": 0.75,
-                    "value": 50,
-                },
-            },
-        )
-    )
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        height=260,
-        margin=dict(l=20, r=20, t=10, b=10),
-        font={"color": "#e6ebf5"},
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    if is_high_risk:
-        st.warning("Recommend routing this customer to the retention team.")
-    else:
-        st.success("Customer appears stable — no action needed.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # ── Top contributing factors (per-customer SHAP breakdown) ─────────
-    st.markdown('<div class="ct-card">', unsafe_allow_html=True)
-    st.markdown('<div class="ct-section-label">Why This Score — Top Contributing Factors</div>', unsafe_allow_html=True)
-
+    # ── Why This Score — rung-tick SHAP factor breakdown ────────────────
     factor_df = (
         pd.DataFrame({"feature": model_columns, "impact": row_shap})
         .assign(abs_impact=lambda d: d["impact"].abs())
@@ -335,27 +319,45 @@ if predict_clicked:
     )
     max_abs = factor_df["abs_impact"].max() or 1
 
+    # Each row — and the assembled block below — is built as a single-line
+    # string on purpose. st.markdown feeds this through a Markdown parser
+    # before it becomes HTML, and a multi-line string with a blank line
+    # followed by 4+ spaces of indentation gets misread as an *indented code
+    # block* (a plain Markdown rule) instead of being passed through as HTML
+    # — which is exactly what happened here during testing: the factor list
+    # rendered as literal escaped tags instead of styled rows. Flattening
+    # every dynamically-built fragment to one line sidesteps that rule
+    # entirely, regardless of how many rows are joined together.
+    row_parts = []
     for _, row in factor_df.iterrows():
-        pct_width = round((row["abs_impact"] / max_abs) * 100)
-        bar_color = "#f87171" if row["impact"] > 0 else "#38bdf8"
+        pct = (row["abs_impact"] / max_abs) * 100
+        color = RISK if row["impact"] > 0 else INFO
         direction = "increases risk" if row["impact"] > 0 else "decreases risk"
-        st.markdown(
-            f"""
-            <div class="factor-row">
-                {row['feature']} — <span style="color:{bar_color}">{direction}</span>
-                <div class="factor-bar-bg">
-                    <div style="width:{pct_width}%; background:{bar_color}; height:100%;"></div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+        row_parts.append(
+            '<div class="factor-row">'
+            f'<div class="factor-label">{row["feature"]}</div>'
+            '<div class="factor-viz">'
+            f'{rung_bar_svg(pct, color)}'
+            f'<span class="factor-dir" style="color:{color}">{direction}</span>'
+            '</div>'
+            '</div>'
         )
-    st.markdown("</div>", unsafe_allow_html=True)
+    rows_html = "".join(row_parts)
+
+    factors_html = (
+        '<div class="section">'
+        '<div class="section-label">Why This Score \u2014 Top Contributing Factors</div>'
+        f'{rows_html}'
+        '<div class="footnote">Red = pushes risk up &nbsp;&nbsp;\u00b7&nbsp;&nbsp; Blue = pulls risk down. '
+        "Computed live via shap.TreeExplainer on this customer's inputs.</div>"
+        '</div>'
+    )
+    st.markdown(factors_html, unsafe_allow_html=True)
 
 else:
     st.markdown(
-        '<p style="color:#8a97ab; font-size:13px; text-align:center;">'
-        "Fill in the customer profile above and click Run Prediction."
+        '<p style="color:#8b8a84; font-size:12.5px; margin-top:24px;">'
+        "Fill in the customer profile above and run the prediction."
         "</p>",
         unsafe_allow_html=True,
     )
